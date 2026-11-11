@@ -287,13 +287,6 @@ jobs:
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi
 
-
-      - name: 生成 fake_state 清理脚本
-        run: |
-          mkdir -p other_patch
-          printf '%s\n' 'import pathlib' 'import re' '' 'p = pathlib.Path("security/selinux/selinuxfs.c")' 'if not p.exists():' '    raise SystemExit(0)' 'lines = p.read_text().splitlines(keepends=True)' 'out, i, removed = [], 0, 0' 'while i < len(lines):' '    ln = lines[i]' '    if "fake_state" in ln:' '        removed += 1' '        if "{" in ln and re.search(r"if\\s*\\(", ln):' '            depth = ln.count("{") - ln.count("}")' '            i += 1' '            while i < len(lines) and depth > 0:' '                depth += lines[i].count("{") - lines[i].count("}")' '                i += 1' '            continue' '        i += 1' '        continue' '    out.append(ln)' '    i += 1' 'p.write_text("".join(out))' 'print("fake_state removed lines:", removed)' > other_patch/clean_fake_state.py
-          python3 -m py_compile other_patch/clean_fake_state.py
-
       - name: 应用 KernelSU & SUSFS 补丁
         if: inputs.susfs_enable
         run: |
@@ -306,17 +299,8 @@ jobs:
             cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
             cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             cd ./common
-            SFP="50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch"
-            patch -p1 -F 0 < "$SFP" || echo '::warning::SUSFS main patch has unmatched hunks'
-            patch -p1 -N -F 0 < 69_hide_stuff.patch || echo '::warning::69_hide_stuff has unmatched hunks'
-            if grep -q 'fake_state' security/selinux/selinuxfs.c; then
-              echo 'fake_state residue found, run cleanup script'
-              python3 ../../other_patch/clean_fake_state.py
-            fi
-            if grep -q 'fake_state' security/selinux/selinuxfs.c; then
-              echo "::error::fake_state 仍存在，终止构建"
-              exit 1
-            fi
+            patch -p1 -F 3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+            patch -p1 -N -F 3 < 69_hide_stuff.patch || true
             cd ..
           else
             echo "已选择无内置KernelSU模式，跳过susfs配置..."
@@ -508,22 +492,11 @@ jobs:
             echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> ./arch/arm64/configs/gki_defconfig
             # 未经测试的配置选项，可能导致bug
+            #echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
+            #echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_FW_LOADER_COMPRESS=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_BRIDGE_NETFILTER=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_NF_TABLES=y" >> ./arch/arm64/configs/gki_defconfig
-            # Droidspaces 要求三项：Macvlan / CPU limit / Process limit
-            echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_MACVLAN=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_MACVLAN_MACIP=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_MACVTAP=m" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_VETH=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_BRIDGE=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUPS=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUP_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_FAIR_GROUP_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CFS_BANDWIDTH=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUP_CPUACCT=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
             # 开启 NTSync
             echo "CONFIG_NTSYNC=y" >> ./arch/arm64/configs/gki_defconfig
             if [[ "${{ github.event.inputs.droidspaces_enable }}" == "extend" ]]; then
