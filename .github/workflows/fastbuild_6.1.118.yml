@@ -287,6 +287,13 @@ jobs:
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi
 
+
+      - name: 生成 fake_state 清理脚本
+        run: |
+          mkdir -p other_patch
+          printf '%s\n' 'import pathlib' 'import re' '' 'p = pathlib.Path("security/selinux/selinuxfs.c")' 'if not p.exists():' '    raise SystemExit(0)' 'lines = p.read_text().splitlines(keepends=True)' 'out, i, removed = [], 0, 0' 'while i < len(lines):' '    ln = lines[i]' '    if "fake_state" in ln:' '        removed += 1' '        if "{" in ln and re.search(r"if\\s*\\(", ln):' '            depth = ln.count("{") - ln.count("}")' '            i += 1' '            while i < len(lines) and depth > 0:' '                depth += lines[i].count("{") - lines[i].count("}")' '                i += 1' '            continue' '        i += 1' '        continue' '    out.append(ln)' '    i += 1' 'p.write_text("".join(out))' 'print("fake_state removed lines:", removed)' > other_patch/clean_fake_state.py
+          python3 -m py_compile other_patch/clean_fake_state.py
+
       - name: 应用 KernelSU & SUSFS 补丁
         if: inputs.susfs_enable
         run: |
@@ -299,33 +306,12 @@ jobs:
             cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
             cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             cd ./common
-            patch -p1 -F 0 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || echo "::warning::SUSFS 主补丁存在未命中 hunk（F=0 已阻止半应用，后续清理兜底）"
-            patch -p1 -N -F 0 < 69_hide_stuff.patch || echo "::warning::69_hide_stuff 存在未命中 hunk"
-            # 兜底：SUSFS 补丁半应用会在 selinuxfs.c 留下未定义的 fake_state 引用，链接期报 undefined symbol
+            SFP="50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch"
+            patch -p1 -F 0 < "$SFP" || echo '::warning::SUSFS main patch has unmatched hunks'
+            patch -p1 -N -F 0 < 69_hide_stuff.patch || echo '::warning::69_hide_stuff has unmatched hunks'
             if grep -q 'fake_state' security/selinux/selinuxfs.c; then
-              echo "检测到 fake_state 残留，清理 sel_write_context 中的半应用分支"
-              python3 - <<'PY'
-import pathlib, re
-p = pathlib.Path("security/selinux/selinuxfs.c")
-lines = p.read_text().splitlines(keepends=True)
-out, i = [], 0
-while i < len(lines):
-    ln = lines[i]
-    if "fake_state" in ln:
-        if "{" in ln and re.search(r'\bif\s*\(', ln):
-            depth = ln.count("{") - ln.count("}")
-            i += 1
-            while i < len(lines) and depth > 0:
-                depth += lines[i].count("{") - lines[i].count("}")
-                i += 1
-            continue
-        i += 1
-        continue
-    out.append(ln)
-    i += 1
-p.write_text("".join(out))
-print("selinuxfs.c 已清理 fake_state")
-PY
+              echo 'fake_state residue found, run cleanup script'
+              python3 ../../other_patch/clean_fake_state.py
             fi
             if grep -q 'fake_state' security/selinux/selinuxfs.c; then
               echo "::error::fake_state 仍存在，终止构建"
