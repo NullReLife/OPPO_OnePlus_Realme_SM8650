@@ -114,18 +114,62 @@ jobs:
           echo "当前仓库：$GITHUB_REPOSITORY"
           echo "当前分支：$GITHUB_REF_NAME"
 
-          # ===== 前台安装构建依赖，确保 libelf-dev 真正装上 =====
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            binutils python-is-python3 libssl-dev libelf-dev \
-            bc bison flex libncurses-dev pkg-config zlib1g-dev
+          # ===== 前台安装构建依赖，apt 源 DNS 抖动容错 =====
+          set +e
 
+          for i in 1 2 3; do
+            if sudo apt-get update; then
+              echo "apt-get update 成功"
+              break
+            fi
+            echo "apt-get update 第 $i 次失败，10 秒后重试..."
+            sleep 10
+          done
+
+          for i in 1 2 3; do
+            if sudo apt-get install -y --no-install-recommends \
+                binutils python-is-python3 libssl-dev libelf-dev \
+                bc bison flex libncurses-dev pkg-config zlib1g-dev; then
+              echo "apt-get install 成功"
+              break
+            fi
+            echo "apt-get install 第 $i 次失败，10 秒后重试..."
+            sleep 10
+          done
+
+          set -e
+
+          # libelf-dev 兜底 1：apt 装不上就直接拉 deb
           if [ ! -f /usr/include/libelf.h ]; then
-            echo "ERROR: /usr/include/libelf.h 不存在，libelf-dev 安装失败"
-            exit 1
+            echo "libelf-dev 未装上，尝试直接从 archive.ubuntu.com 拉 deb..."
+            mkdir -p /tmp/libelf_deb
+            DEB_BASE="http://archive.ubuntu.com/ubuntu/pool/main/e/elfutils"
+            for pkg in \
+              "libelf1t64_0.190-1.1ubuntu0.1_amd64.deb" \
+              "libelf-dev_0.190-1.1ubuntu0.1_amd64.deb"; do
+              for i in 1 2 3; do
+                if wget -q -O "/tmp/libelf_deb/$pkg" "$DEB_BASE/$pkg"; then
+                  echo "下载 $pkg 成功"
+                  break
+                fi
+                echo "下载 $pkg 第 $i 次失败，10 秒后重试..."
+                sleep 10
+              done
+            done
+            set +e
+            sudo dpkg -i /tmp/libelf_deb/libelf1t64_*.deb /tmp/libelf_deb/libelf-dev_*.deb
+            sudo apt-get install -f -y || true
+            set -e
           fi
-          echo "libelf.h 存在，pkg-config 信息："
-          pkg-config --cflags --libs libelf
+
+          # libelf-dev 兜底 2：仍然没有，标记跳过 BTF
+          if [ ! -f /usr/include/libelf.h ]; then
+            echo "WARN: /usr/include/libelf.h 仍不存在，本次构建禁用 DEBUG_INFO_BTF 跳过 resolve_btfids"
+            echo "SKIP_BTF=1" >> $GITHUB_ENV
+          else
+            echo "libelf.h 存在，pkg-config 信息："
+            pkg-config --cflags --libs libelf
+          fi
 
           # 只 hold firefox，不再 hold libc-bin
           sudo apt-mark hold firefox
@@ -712,7 +756,15 @@ jobs:
           sudo rm -rf /usr/local/lib/android &
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig &&
+
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+
+          # libelf 不可用时禁用 BTF，跳过 resolve_btfids
+          if [ "${SKIP_BTF:-0}" = "1" ]; then
+            echo "SKIP_BTF=1，禁用 DEBUG_INFO_BTF..."
+            ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d DEBUG_INFO_BTF_MODULES
+          fi
+
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error HOSTPKG_CONFIG=pkg-config Image
 
           # 编译后时间劫持二次校验
