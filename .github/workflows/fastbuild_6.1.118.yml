@@ -171,9 +171,8 @@ jobs:
             pkg-config --cflags --libs libelf
           fi
 
-          # 只 hold firefox，不再 hold libc-bin
-          sudo apt-mark hold firefox
-          sudo apt purge man-db
+          sudo apt-mark hold firefox &&
+          sudo apt purge man-db &&
           sudo rm -rf /var/lib/man-db/auto-update
 
           #旧版完整指令：（由于经过验证大部分指令已内置于GitHub Action环境中，故进行精简）
@@ -399,6 +398,40 @@ jobs:
             cd ./KernelSU
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
+
+      - name: 修复 fake_state 未定义 (69_hide_stuff.patch hunk 部分失败导致)
+        if: inputs.susfs_enable
+        run: |
+          cd kernel_workspace/common
+          echo ">>> 检查 selinuxfs.c 中的 fake_state 引用..."
+          if grep -q "fake_state" security/selinux/selinuxfs.c 2>/dev/null; then
+            echo ">>> selinuxfs.c 引用了 fake_state，检查是否已有定义..."
+            HAS_DEF=0
+            for f in security/selinux/hooks.c security/selinux/selinuxfs.c security/selinux/include/security.h; do
+              if [ -f "$f" ] && grep -qE "^(static )?struct selinux_state fake_state\b" "$f" 2>/dev/null; then
+                echo ">>> 已在 $f 中找到 fake_state 定义，跳过"
+                HAS_DEF=1
+                break
+              fi
+            done
+
+            if [ "$HAS_DEF" = "0" ]; then
+              echo ">>> fake_state 被引用但未定义，在 hooks.c 中添加定义"
+              if grep -q "^struct selinux_state selinux_state;" security/selinux/hooks.c; then
+                sed -i '/^struct selinux_state selinux_state;/a struct selinux_state fake_state;' security/selinux/hooks.c
+                echo ">>> 已在 hooks.c 的 struct selinux_state selinux_state; 之后添加 fake_state"
+              else
+                echo ">>> 未找到标准位置，在 hooks.c 文件末尾追加"
+                echo "" >> security/selinux/hooks.c
+                echo "struct selinux_state fake_state;" >> security/selinux/hooks.c
+              fi
+            fi
+          else
+            echo ">>> selinuxfs.c 未引用 fake_state，跳过"
+          fi
+
+          echo ">>> 确认修复结果:"
+          grep -n "fake_state" security/selinux/hooks.c security/selinux/selinuxfs.c 2>/dev/null | head -20 || true
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
