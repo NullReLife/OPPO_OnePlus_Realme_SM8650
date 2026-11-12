@@ -311,7 +311,77 @@ jobs:
             cd ./KernelSU
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
-          
+
+      - name: 修复 fake_state 强符号导出 & preinit_runner.mk 路径
+        run: |
+          cd kernel_workspace/common
+          echo "============================================================"
+          echo "修复 1: fake_state 提升为强符号 (ThinLTO 链接修复)"
+          echo "============================================================"
+          # BakaSU 的 SUSFS inline hook 中 fake_state 常被定义为 static，
+          # ThinLTO 下会被内部化，导致 security/selinux/selinuxfs.o 引用时
+          # 报错: ld.lld: error: undefined symbol: fake_state
+          # 方案: 全局搜索 fake_state 的定义，去除 static 修饰，
+          #       并在定义后追加 EXPORT_SYMBOL(fake_state)，
+          #       保证跨 LTO 分区可见。
+
+          # 1a. 优先搜索带 static 且包含 fake_state 的定义行
+          STATIC_FILES=$(grep -rlE '^static[[:space:]]+.*[[:space:]]fake_state[[:space:]]*(\[[^]]*\])?[[:space:]]*(=|;)' \
+                         --include="*.c" --include="*.h" . 2>/dev/null || true)
+
+          # 1b. 如果没有 static 定义，搜索任何 fake_state 的全局定义
+          if [ -z "$STATIC_FILES" ]; then
+            echo "未找到 static fake_state 定义，尝试全局搜索..."
+            STATIC_FILES=$(grep -rlE '^[a-zA-Z_][a-zA-Z0-9_[:space:]\*]*[[:space:]]fake_state[[:space:]]*(=|;)' \
+                           --include="*.c" --include="*.h" . 2>/dev/null || true)
+          fi
+
+          if [ -z "$STATIC_FILES" ]; then
+            echo "::warning::未找到 fake_state 定义，跳过符号修复。请人工检查 SUSFS inline hook 源文件。"
+          else
+            for f in $STATIC_FILES; do
+              echo ">>> 修补 fake_state 定义文件: $f"
+              # 去除 static 修饰（行首的 static）
+              sed -i -E 's/^static([[:space:]]+[a-zA-Z_].*[[:space:]]fake_state)/\1/' "$f"
+              # 若已有 EXPORT_SYMBOL(fake_state) 则跳过，否则插入到定义行之后
+              if grep -q 'EXPORT_SYMBOL(fake_state)' "$f"; then
+                echo "    已存在 EXPORT_SYMBOL(fake_state)，跳过插入。"
+              else
+                # 在定义 fake_state 的那一行之后插入 EXPORT_SYMBOL
+                sed -i -E '/^[a-zA-Z_].*[[:space:]]fake_state[[:space:]]*(=|;).*/a EXPORT_SYMBOL(fake_state);' "$f"
+                echo "    已追加 EXPORT_SYMBOL(fake_state)。"
+              fi
+            done
+          fi
+
+          echo ""
+          echo "--- fake_state 修复后的状态 ---"
+          grep -rnE '\bfake_state\b' --include="*.c" drivers/ security/ 2>/dev/null | head -20 || true
+
+          echo ""
+          echo "============================================================"
+          echo "修复 2: preinit_runner.mk 中 Makefile.extrawarn 路径"
+          echo "============================================================"
+          # out/ 子目录下没有 ../scripts/，原相对路径必然失败。
+          # 改为 $(srctree)/scripts/Makefile.extrawarn。
+          PREINIT_MKS=$(find . -name "preinit_runner.mk" 2>/dev/null || true)
+          if [ -z "$PREINIT_MKS" ]; then
+            echo "未找到 preinit_runner.mk，跳过。"
+          else
+            for f in $PREINIT_MKS; do
+              echo ">>> 修补 preinit_runner.mk: $f"
+              sed -i 's|\.\./scripts/Makefile\.extrawarn|$(srctree)/scripts/Makefile.extrawarn|g' "$f"
+              sed -i 's|include \.\./scripts/|include $(srctree)/scripts/|g' "$f"
+              echo "    修补后包含 extrawarn/srctree 的行:"
+              grep -nE 'extrawarn|srctree' "$f" | head -5 || true
+            done
+          fi
+
+          echo ""
+          echo "============================================================"
+          echo "修复步骤完成。"
+          echo "============================================================"
+
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
@@ -482,6 +552,7 @@ jobs:
             patch -p1 -F 3 < ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
             # 开启 Droidspaces 容器所需内核支持
             echo "CONFIG_PID_NS=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_MACVLAN=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_IPC_NS=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_USER_NS=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_SYSVIPC=y" >> ./arch/arm64/configs/gki_defconfig
