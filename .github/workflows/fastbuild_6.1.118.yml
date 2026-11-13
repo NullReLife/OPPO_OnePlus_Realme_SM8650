@@ -113,39 +113,102 @@ jobs:
           cd kernel_workspace
           echo "当前仓库：$GITHUB_REPOSITORY"
           echo "当前分支：$GITHUB_REF_NAME"
-          
+
+          # ===== 前台安装构建依赖，apt 源 DNS 抖动容错 =====
+          set +e
+
+          for i in 1 2 3; do
+            if sudo apt-get update; then
+              echo "apt-get update 成功"
+              break
+            fi
+            echo "apt-get update 第 $i 次失败，10 秒后重试..."
+            sleep 10
+          done
+
+          for i in 1 2 3; do
+            if sudo apt-get install -y --no-install-recommends \
+                binutils python-is-python3 libssl-dev libelf-dev \
+                bc bison flex libncurses-dev pkg-config zlib1g-dev; then
+              echo "apt-get install 成功"
+              break
+            fi
+            echo "apt-get install 第 $i 次失败，10 秒后重试..."
+            sleep 10
+          done
+
+          set -e
+
+          # libelf-dev 兜底 1：apt 装不上就直接拉 deb
+          if [ ! -f /usr/include/libelf.h ]; then
+            echo "libelf-dev 未装上，尝试直接从 archive.ubuntu.com 拉 deb..."
+            mkdir -p /tmp/libelf_deb
+            DEB_BASE="http://archive.ubuntu.com/ubuntu/pool/main/e/elfutils"
+            for pkg in \
+              "libelf1t64_0.190-1.1ubuntu0.1_amd64.deb" \
+              "libelf-dev_0.190-1.1ubuntu0.1_amd64.deb"; do
+              for i in 1 2 3; do
+                if wget -q -O "/tmp/libelf_deb/$pkg" "$DEB_BASE/$pkg"; then
+                  echo "下载 $pkg 成功"
+                  break
+                fi
+                echo "下载 $pkg 第 $i 次失败，10 秒后重试..."
+                sleep 10
+              done
+            done
+            set +e
+            sudo dpkg -i /tmp/libelf_deb/libelf1t64_*.deb /tmp/libelf_deb/libelf-dev_*.deb
+            sudo apt-get install -f -y || true
+            set -e
+          fi
+
+          # libelf-dev 兜底 2：仍然没有，标记跳过 BTF
+          if [ ! -f /usr/include/libelf.h ]; then
+            echo "WARN: /usr/include/libelf.h 仍不存在，本次构建禁用 DEBUG_INFO_BTF 跳过 resolve_btfids"
+            echo "SKIP_BTF=1" >> $GITHUB_ENV
+          else
+            echo "libelf.h 存在，pkg-config 信息："
+            pkg-config --cflags --libs libelf
+          fi
+
           sudo apt-mark hold firefox &&
-          sudo apt-mark hold libc-bin &&
           sudo apt purge man-db &&
-          sudo rm -rf /var/lib/man-db/auto-update &&
-          sudo apt update &&
-          sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev &
+          sudo rm -rf /var/lib/man-db/auto-update
+
           #旧版完整指令：（由于经过验证大部分指令已内置于GitHub Action环境中，故进行精简）
           #sudo apt-get install -y --no-install-recommends curl bison flex make binutils git perl gcc python3 python-is-python3 bc libssl-dev libelf-dev zip unzip ccache
-          
+
           #使用最新版ccache-ECS（特化优化内核编译缓存，大幅提升二次不同配置编译速度）
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/ccache-x86-64 -O ccache &&
-          sudo cp -f ./ccache /usr/bin/ccache &&
-          sudo chmod +x /usr/bin/ccache &&
-          rm -f ./ccache &
-          
-          echo "正在克隆源码仓库..."
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_b_16.0.0_oneplus12.zip -o common.zip && 
-          unzip -q common.zip && 
-          mv "android_kernel_common_oneplus_sm8650-oneplus-sm8650_b_16.0.0_oneplus12" common &&
-          rm -rf common.zip &
-          
-          echo "正在克隆llvm-Clang20工具链..." &&
-          mkdir -p clang20 &&
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip -o clang.zip &&
-          unzip -q clang.zip -d clang20 &&
-          rm -rf clang.zip &
-          
-          echo "正在克隆构建工具..." &&
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/build-tools.zip -o build-tools.zip &&
-          unzip -q build-tools.zip &&
-          rm -rf build-tools.zip &
-          
+          (
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/ccache-x86-64 -O ccache &&
+            sudo cp -f ./ccache /usr/bin/ccache &&
+            sudo chmod +x /usr/bin/ccache &&
+            rm -f ./ccache
+          ) &
+
+          (
+            echo "正在克隆源码仓库..."
+            aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_b_16.0.0_oneplus12.zip -o common.zip &&
+            unzip -q common.zip &&
+            mv "android_kernel_common_oneplus_sm8650-oneplus-sm8650_b_16.0.0_oneplus12" common &&
+            rm -rf common.zip
+          ) &
+
+          (
+            echo "正在克隆llvm-Clang20工具链..." &&
+            mkdir -p clang20 &&
+            aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip -o clang.zip &&
+            unzip -q clang.zip -d clang20 &&
+            rm -rf clang.zip
+          ) &
+
+          (
+            echo "正在克隆构建工具..." &&
+            aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/build-tools.zip -o build-tools.zip &&
+            unzip -q build-tools.zip &&
+            rm -rf build-tools.zip
+          ) &
+
           wait
           echo "所有源码及llvm-Clang20工具链初始化完成！"
           echo "正在去除 ABI 保护 & 去除 dirty 后缀..."
@@ -154,6 +217,30 @@ jobs:
             sed -i 's/ -dirty//g' "$f"
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
           done
+
+      - name: 修补 resolve_btfids 使用 pkg-config 定位 libelf
+        run: |
+          cd kernel_workspace/common
+          TARGET="tools/bpf/resolve_btfids/Makefile"
+          echo "修补 $TARGET ..."
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("tools/bpf/resolve_btfids/Makefile")
+          s = p.read_text()
+          old = "LIBS = -lelf -lz"
+          new = """LIBELF_FLAGS := $(shell $(HOSTPKG_CONFIG) libelf --cflags 2>/dev/null)
+          LIBELF_LIBS := $(shell $(HOSTPKG_CONFIG) libelf --libs 2>/dev/null || echo -lelf)
+          CFLAGS += $(LIBELF_FLAGS)
+          LIBS = $(LIBELF_LIBS) -lz"""
+          if old in s:
+              s = s.replace(old, new, 1)
+              p.write_text(s)
+              print("已替换 LIBS 行")
+          else:
+              print("未找到预期的 LIBS = -lelf -lz 行，检查 Makefile 内容")
+          PY
+          echo "--- 修补后相关行 ---"
+          grep -n -E 'LIBELF|LIBS|CFLAGS' "$TARGET" | tail -20
 
       - name: 配置ccache目录
         run: |
@@ -188,7 +275,7 @@ jobs:
             echo "检测到本地已成功载入 ccache 缓存，跳过公共 ccache 拉取！"
             exit 0
           fi
-          
+
           echo "未命中缓存，尝试拉取最新公共 ccache ..."
           mkdir -p ${{ env.CCACHE_DIR }}
           if [[ "${{ github.event.inputs.droidspaces_enable }}" != "false" ]]; then
@@ -196,7 +283,7 @@ jobs:
           else
             FILE_NAME="ccache-${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}.tar.zst"
           fi
-          
+
           if gh release download -p "$FILE_NAME" -R cctv18/public_ccache; then
             echo "成功下载 $FILE_NAME，正在解压..."
             tar -I zstd -xf "$FILE_NAME" -C ${{ env.CCACHE_DIR }}
@@ -216,7 +303,7 @@ jobs:
           else
             echo "旧缓存不存在或已被清理！"
           fi
-      
+
       - name: 初始化并配置ccache
         run: |
           # 设置ccache环境变量
@@ -226,19 +313,19 @@ jobs:
           export CCACHE_NOHARDLINK="true"
           export CCACHE_DIR="${{ env.CCACHE_DIR }}"
           export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
-          
+
           # 确保ccache目录存在
           mkdir -p "$CCACHE_DIR"
-          
+
           # 每次运行都重新配置缓存大小
           echo "配置ccache缓存大小为: $CCACHE_MAXSIZE"
           ccache -M "$CCACHE_MAXSIZE"
           ccache -o compression=true
-          
+
           # 显示初始缓存状态
           echo "ccache初始状态:"
           ccache -s
-          
+
           # 如果缓存恢复命中，显示详细信息
           if [ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]; then
             echo "ccache缓存命中详情:"
@@ -312,75 +399,39 @@ jobs:
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
 
-      - name: 修复 fake_state 强符号导出 & preinit_runner.mk 路径
+      - name: 修复 fake_state 未定义 (69_hide_stuff.patch hunk 部分失败导致)
+        if: inputs.susfs_enable
         run: |
           cd kernel_workspace/common
-          echo "============================================================"
-          echo "修复 1: fake_state 提升为强符号 (ThinLTO 链接修复)"
-          echo "============================================================"
-          # BakaSU 的 SUSFS inline hook 中 fake_state 常被定义为 static，
-          # ThinLTO 下会被内部化，导致 security/selinux/selinuxfs.o 引用时
-          # 报错: ld.lld: error: undefined symbol: fake_state
-          # 方案: 全局搜索 fake_state 的定义，去除 static 修饰，
-          #       并在定义后追加 EXPORT_SYMBOL(fake_state)，
-          #       保证跨 LTO 分区可见。
-
-          # 1a. 优先搜索带 static 且包含 fake_state 的定义行
-          STATIC_FILES=$(grep -rlE '^static[[:space:]]+.*[[:space:]]fake_state[[:space:]]*(\[[^]]*\])?[[:space:]]*(=|;)' \
-                         --include="*.c" --include="*.h" . 2>/dev/null || true)
-
-          # 1b. 如果没有 static 定义，搜索任何 fake_state 的全局定义
-          if [ -z "$STATIC_FILES" ]; then
-            echo "未找到 static fake_state 定义，尝试全局搜索..."
-            STATIC_FILES=$(grep -rlE '^[a-zA-Z_][a-zA-Z0-9_[:space:]\*]*[[:space:]]fake_state[[:space:]]*(=|;)' \
-                           --include="*.c" --include="*.h" . 2>/dev/null || true)
-          fi
-
-          if [ -z "$STATIC_FILES" ]; then
-            echo "::warning::未找到 fake_state 定义，跳过符号修复。请人工检查 SUSFS inline hook 源文件。"
-          else
-            for f in $STATIC_FILES; do
-              echo ">>> 修补 fake_state 定义文件: $f"
-              # 去除 static 修饰（行首的 static）
-              sed -i -E 's/^static([[:space:]]+[a-zA-Z_].*[[:space:]]fake_state)/\1/' "$f"
-              # 若已有 EXPORT_SYMBOL(fake_state) 则跳过，否则插入到定义行之后
-              if grep -q 'EXPORT_SYMBOL(fake_state)' "$f"; then
-                echo "    已存在 EXPORT_SYMBOL(fake_state)，跳过插入。"
-              else
-                # 在定义 fake_state 的那一行之后插入 EXPORT_SYMBOL
-                sed -i -E '/^[a-zA-Z_].*[[:space:]]fake_state[[:space:]]*(=|;).*/a EXPORT_SYMBOL(fake_state);' "$f"
-                echo "    已追加 EXPORT_SYMBOL(fake_state)。"
+          echo ">>> 检查 selinuxfs.c 中的 fake_state 引用..."
+          if grep -q "fake_state" security/selinux/selinuxfs.c 2>/dev/null; then
+            echo ">>> selinuxfs.c 引用了 fake_state，检查是否已有定义..."
+            HAS_DEF=0
+            for f in security/selinux/hooks.c security/selinux/selinuxfs.c security/selinux/include/security.h; do
+              if [ -f "$f" ] && grep -qE "^(static )?struct selinux_state fake_state\b" "$f" 2>/dev/null; then
+                echo ">>> 已在 $f 中找到 fake_state 定义，跳过"
+                HAS_DEF=1
+                break
               fi
             done
-          fi
 
-          echo ""
-          echo "--- fake_state 修复后的状态 ---"
-          grep -rnE '\bfake_state\b' --include="*.c" drivers/ security/ 2>/dev/null | head -20 || true
-
-          echo ""
-          echo "============================================================"
-          echo "修复 2: preinit_runner.mk 中 Makefile.extrawarn 路径"
-          echo "============================================================"
-          # out/ 子目录下没有 ../scripts/，原相对路径必然失败。
-          # 改为 $(srctree)/scripts/Makefile.extrawarn。
-          PREINIT_MKS=$(find . -name "preinit_runner.mk" 2>/dev/null || true)
-          if [ -z "$PREINIT_MKS" ]; then
-            echo "未找到 preinit_runner.mk，跳过。"
+            if [ "$HAS_DEF" = "0" ]; then
+              echo ">>> fake_state 被引用但未定义，在 hooks.c 中添加定义"
+              if grep -q "^struct selinux_state selinux_state;" security/selinux/hooks.c; then
+                sed -i '/^struct selinux_state selinux_state;/a struct selinux_state fake_state;' security/selinux/hooks.c
+                echo ">>> 已在 hooks.c 的 struct selinux_state selinux_state; 之后添加 fake_state"
+              else
+                echo ">>> 未找到标准位置，在 hooks.c 文件末尾追加"
+                echo "" >> security/selinux/hooks.c
+                echo "struct selinux_state fake_state;" >> security/selinux/hooks.c
+              fi
+            fi
           else
-            for f in $PREINIT_MKS; do
-              echo ">>> 修补 preinit_runner.mk: $f"
-              sed -i 's|\.\./scripts/Makefile\.extrawarn|$(srctree)/scripts/Makefile.extrawarn|g' "$f"
-              sed -i 's|include \.\./scripts/|include $(srctree)/scripts/|g' "$f"
-              echo "    修补后包含 extrawarn/srctree 的行:"
-              grep -nE 'extrawarn|srctree' "$f" | head -5 || true
-            done
+            echo ">>> selinuxfs.c 未引用 fake_state，跳过"
           fi
 
-          echo ""
-          echo "============================================================"
-          echo "修复步骤完成。"
-          echo "============================================================"
+          echo ">>> 确认修复结果:"
+          grep -n "fake_state" security/selinux/hooks.c security/selinux/selinuxfs.c 2>/dev/null | head -20 || true
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
@@ -409,7 +460,7 @@ jobs:
           cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./crypto
           cp ../SukiSU_patch/other/zram/zram_patch/${{ env.KERNEL_VERSION }}/lz4kd.patch ./
           patch -p1 -F 3 < lz4kd.patch || true
-          
+
       - name: 添加SUSFS 配置项
         if: inputs.susfs_enable
         run: |
@@ -429,7 +480,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
+
       - name: 添加 KSU & 其他配置项
         run: |
           cd kernel_workspace
@@ -457,7 +508,7 @@ jobs:
           cd common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cve-2026-43499-rtmutex-6.1.patch
           patch -p1 -F 3 < cve-2026-43499-rtmutex-6.1.patch
-          
+
       - name: 启用网络功能增强优化配置
         if: inputs.better_net
         run: |
@@ -552,7 +603,6 @@ jobs:
             patch -p1 -F 3 < ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
             # 开启 Droidspaces 容器所需内核支持
             echo "CONFIG_PID_NS=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_MACVLAN=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_IPC_NS=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_USER_NS=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_SYSVIPC=y" >> ./arch/arm64/configs/gki_defconfig
@@ -563,11 +613,22 @@ jobs:
             echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> ./arch/arm64/configs/gki_defconfig
             # 未经测试的配置选项，可能导致bug
-            #echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
-            #echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_FW_LOADER_COMPRESS=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_BRIDGE_NETFILTER=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_NF_TABLES=y" >> ./arch/arm64/configs/gki_defconfig
+            # Droidspaces 要求三项：Macvlan / CPU limit / Process limit
+            echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_MACVLAN=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_MACVLAN_MACIP=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_MACVTAP=m" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_VETH=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_BRIDGE=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CGROUPS=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CGROUP_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_FAIR_GROUP_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CFS_BANDWIDTH=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CGROUP_CPUACCT=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
             # 开启 NTSync
             echo "CONFIG_NTSYNC=y" >> ./arch/arm64/configs/gki_defconfig
             if [[ "${{ github.event.inputs.droidspaces_enable }}" == "extend" ]]; then
@@ -680,7 +741,7 @@ jobs:
           export CCACHE_MAXSIZE="3G"
           export CCACHE_IS_KERNEL_COMPILING="true"
           echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf"
-          
+
           cd kernel_workspace/common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/libfakestat.so
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/libfaketimeMT.so
@@ -703,7 +764,7 @@ jobs:
           echo 'export FAKESTAT="'$FAKESTAT'"' >> ld-wrapper
           echo 'export FAKETIME="'$FAKETIME'"' >> ld-wrapper
           echo 'ld.lld "$@"' >> ld-wrapper
-          
+
           # 测试时间劫持测试是否正常工作
           echo "--- [Wrapper Test] 正在创建通用的时间劫持测试脚本 ---"
           echo '#!/bin/bash' > test-wrapper.sh
@@ -722,15 +783,23 @@ jobs:
           echo "--- 编译前环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
           echo "--- 编译前环境文件时间戳: ---"
           LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
-          
+
           #在构建内核的同时清除不必要的.NET, Android NDK, Haskell, CodeQL运行库，清理空间且不阻塞后续步骤运行
           sudo rm -rf /usr/share/dotnet &
           sudo rm -rf /usr/local/lib/android &
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig &&
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
-          
+
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
+
+          # libelf 不可用时禁用 BTF，跳过 resolve_btfids
+          if [ "${SKIP_BTF:-0}" = "1" ]; then
+            echo "SKIP_BTF=1，禁用 DEBUG_INFO_BTF..."
+            ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d DEBUG_INFO_BTF_MODULES
+          fi
+
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error HOSTPKG_CONFIG=pkg-config Image
+
           # 编译后时间劫持二次校验
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
           echo "--- 编译后环境文件时间戳: ---"
@@ -747,7 +816,7 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ github.ref_name }}
-         
+
       - name: 应用KPM并修补内核
         if: inputs.kpm_enable
         run: |
@@ -759,7 +828,7 @@ jobs:
           ./kptools-linux -p -i ./Image -k ./kpimg-linux -o ./oImage
           rm -f Image
           mv oImage Image
-          
+
       - name: 克隆 AnyKernel3 并打包
         id: create_zip
         run: |
@@ -796,7 +865,7 @@ jobs:
           fi
           zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
-          
+
           #为AK3添加注释（调试信息）
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
             FULL_VERSION=${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-${{ github.event.inputs.kernel_suffix }}
@@ -838,7 +907,7 @@ jobs:
       contents: write
       packages: write
       actions: read
-      
+
     steps:
       - name: 下载 ZIP 工件
         uses: actions/download-artifact@v8
@@ -876,7 +945,7 @@ jobs:
             KSU_TYPENAME="无内置KSU"
           fi
           echo "KSU_TYPENAME=$KSU_TYPENAME" >> $GITHUB_ENV
-         
+
       - name: 创建发布
         id: create_release
         env:
@@ -904,11 +973,11 @@ jobs:
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
-          
+
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
           - (预留)
-          
+
           ### 📋 安装方法 | Installation Guide
           1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；
           2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启；
@@ -916,7 +985,7 @@ jobs:
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
           5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
           6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与(Re)SukiSU内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
-          
+
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF
 
