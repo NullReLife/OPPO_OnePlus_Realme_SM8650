@@ -603,6 +603,7 @@ jobs:
             patch -p1 -F 3 < ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
             # 开启 Droidspaces 容器所需内核支持
             echo "CONFIG_PID_NS=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_MACVLAN=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_IPC_NS=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_USER_NS=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_SYSVIPC=y" >> ./arch/arm64/configs/gki_defconfig
@@ -613,22 +614,11 @@ jobs:
             echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> ./arch/arm64/configs/gki_defconfig
             # 未经测试的配置选项，可能导致bug
+            #echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
+            #echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_FW_LOADER_COMPRESS=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_BRIDGE_NETFILTER=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_NF_TABLES=y" >> ./arch/arm64/configs/gki_defconfig
-            # Droidspaces 要求三项：Macvlan / CPU limit / Process limit
-            echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_MACVLAN=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_MACVLAN_MACIP=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_MACVTAP=m" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_VETH=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_BRIDGE=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUPS=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUP_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_FAIR_GROUP_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CFS_BANDWIDTH=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUP_CPUACCT=y" >> ./arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
             # 开启 NTSync
             echo "CONFIG_NTSYNC=y" >> ./arch/arm64/configs/gki_defconfig
             if [[ "${{ github.event.inputs.droidspaces_enable }}" == "extend" ]]; then
